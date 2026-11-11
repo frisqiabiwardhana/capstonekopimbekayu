@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme {
+  --color-espresso: #49372D;
+  --color-mocha: #8B6B52;
+  --color-beige: #D8C7B3;
+  --color-ivory: #F5F1E9;
+  --color-mainText: #302923;
+  --color-secondaryText: #8A796D;
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-serif: 'Playfair Display', Georgia, serif;
+}
+
+body {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  background-color: #F5F1E9;
+  color: #302923;
+}
+
+/* Custom scrollbars and print styling */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+  }
+}
