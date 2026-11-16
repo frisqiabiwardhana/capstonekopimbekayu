@@ -19,7 +19,8 @@ import {
 import {
   calculateMaterialStock,
   canFulfillOutgoing,
-  checkPermission
+  checkPermission,
+  validateInventoryIntegrity
 } from '../utils/inventoryRules';
 
 interface InventoryContextType {
@@ -42,12 +43,15 @@ interface InventoryContextType {
   // Transactions
   addIncoming: (data: Omit<IncomingTransaction, 'id' | 'transactionNumber' | 'status' | 'createdBy' | 'createdAt'>) => { success: boolean; message?: string };
   updateIncoming: (id: string, data: Partial<IncomingTransaction>) => { success: boolean; message?: string };
+  deleteIncoming: (id: string) => { success: boolean; message?: string };
   verifyIncoming: (id: string) => { success: boolean; message?: string };
   addOutgoing: (data: Omit<OutgoingTransaction, 'id' | 'transactionNumber' | 'status' | 'createdBy' | 'createdAt'>) => { success: boolean; message?: string };
   updateOutgoing: (id: string, data: Partial<OutgoingTransaction>) => { success: boolean; message?: string };
+  deleteOutgoing: (id: string) => { success: boolean; message?: string };
   verifyOutgoing: (id: string) => { success: boolean; message?: string };
   addReturn: (data: Omit<ReturnTransaction, 'id' | 'transactionNumber' | 'status' | 'isReusableForStock' | 'createdBy' | 'createdAt'>) => { success: boolean; message?: string };
   updateReturn: (id: string, data: Partial<ReturnTransaction>) => { success: boolean; message?: string };
+  deleteReturn: (id: string) => { success: boolean; message?: string };
   verifyReturn: (id: string) => { success: boolean; message?: string };
   approveReturn: (id: string, isReusableForStock: boolean, ownerNotes?: string) => { success: boolean; message?: string };
   rejectReturn: (id: string, ownerNotes?: string) => { success: boolean; message?: string };
@@ -241,25 +245,110 @@ export const InventoryProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const updateIncoming = (id: string, updatedData: Partial<IncomingTransaction>) => {
     if (!currentUser) return { success: false, message: 'Harap masuk terlebih dahulu.' };
-    if (currentUser.role !== 'VERIFIKATOR') {
-      return { success: false, message: 'Hanya peran VERIFIKATOR yang berwenang melakukan koreksi data.' };
+
+    const existing = incomingList.find(item => item.id === id);
+    if (!existing) return { success: false, message: 'Transaksi bahan baku masuk tidak ditemukan.' };
+
+    const canEditAny = checkPermission(currentUser.role, 'masuk', 'edit');
+    const canCorrectPending =
+      currentUser.role === 'VERIFIKATOR' && existing.status === 'Menunggu Verifikasi';
+
+    if (!canEditAny && !canCorrectPending) {
+      return {
+        success: false,
+        message: 'Anda tidak memiliki izin untuk mengedit transaksi bahan baku masuk ini.'
+      };
     }
 
-    setIncomingList(prev =>
-      prev.map(item => {
-        if (item.id === id) {
-          const qty = updatedData.quantityKg !== undefined ? updatedData.quantityKg : item.quantityKg;
-          const price = updatedData.pricePerKg !== undefined ? updatedData.pricePerKg : item.pricePerKg;
-          return {
-            ...item,
-            ...updatedData,
-            totalCost: price && qty ? price * qty : item.totalCost
-          };
-        }
-        return item;
-      })
-    );
-    return { success: true, message: 'Koreksi data bahan baku masuk berhasil disimpan.' };
+    const nextMaterialId = updatedData.materialId ?? existing.materialId;
+    const targetMaterial = materials.find(m => m.id === nextMaterialId);
+    if (!targetMaterial) {
+      return { success: false, message: 'Jenis bahan baku yang dipilih tidak valid.' };
+    }
+
+    const nextQty =
+      updatedData.quantityKg !== undefined ? Number(updatedData.quantityKg) : existing.quantityKg;
+    if (isNaN(nextQty) || nextQty <= 0) {
+      return { success: false, message: 'Jumlah bahan baku masuk harus lebih besar dari 0 kg.' };
+    }
+
+    const nextSupplier =
+      updatedData.supplierName !== undefined ? updatedData.supplierName.trim() : existing.supplierName;
+    if (!nextSupplier) {
+      return { success: false, message: 'Nama pemasok wajib diisi.' };
+    }
+
+    const nextDate = updatedData.date !== undefined ? updatedData.date : existing.date;
+    if (!nextDate) {
+      return { success: false, message: 'Tanggal transaksi wajib diisi.' };
+    }
+
+    const hasExplicitPrice = Object.prototype.hasOwnProperty.call(updatedData, 'pricePerKg');
+    const rawPrice = hasExplicitPrice ? updatedData.pricePerKg : existing.pricePerKg;
+    const nextPrice =
+      rawPrice !== undefined && !isNaN(Number(rawPrice)) && Number(rawPrice) > 0
+        ? Number(rawPrice)
+        : undefined;
+    const nextTotalCost = nextPrice !== undefined ? Number((nextPrice * nextQty).toFixed(2)) : undefined;
+
+    const nextIncomingList = incomingList.map(item => {
+      if (item.id !== id) return item;
+      return {
+        ...item,
+        ...updatedData,
+        date: nextDate,
+        materialId: targetMaterial.id,
+        materialName: targetMaterial.name,
+        quantityKg: nextQty,
+        supplierName: nextSupplier,
+        pricePerKg: nextPrice,
+        totalCost: nextTotalCost
+      };
+    });
+
+    if (existing.status === 'Terverifikasi') {
+      const integrity = validateInventoryIntegrity(materials, nextIncomingList, outgoingList, returnsList);
+      if (!integrity.valid) {
+        return { success: false, message: integrity.message };
+      }
+    }
+
+    setIncomingList(nextIncomingList);
+    return {
+      success: true,
+      message:
+        currentUser.role === 'VERIFIKATOR'
+          ? 'Koreksi data bahan baku masuk berhasil disimpan.'
+          : `Transaksi ${existing.transactionNumber} berhasil diperbarui.`
+    };
+  };
+
+  const deleteIncoming = (id: string) => {
+    if (!currentUser) return { success: false, message: 'Harap masuk terlebih dahulu.' };
+    if (!checkPermission(currentUser.role, 'masuk', 'delete')) {
+      return {
+        success: false,
+        message: 'Hanya PEMILIK dan OPERATOR yang berwenang menghapus transaksi bahan baku masuk.'
+      };
+    }
+
+    const existing = incomingList.find(item => item.id === id);
+    if (!existing) return { success: false, message: 'Transaksi bahan baku masuk tidak ditemukan.' };
+
+    const nextIncomingList = incomingList.filter(item => item.id !== id);
+
+    if (existing.status === 'Terverifikasi') {
+      const integrity = validateInventoryIntegrity(materials, nextIncomingList, outgoingList, returnsList);
+      if (!integrity.valid) {
+        return { success: false, message: integrity.message };
+      }
+    }
+
+    setIncomingList(nextIncomingList);
+    return {
+      success: true,
+      message: `Transaksi ${existing.transactionNumber} berhasil dihapus dan stok telah dihitung ulang.`
+    };
   };
 
   const verifyIncoming = (id: string) => {
@@ -328,14 +417,99 @@ export const InventoryProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const updateOutgoing = (id: string, updatedData: Partial<OutgoingTransaction>) => {
     if (!currentUser) return { success: false, message: 'Harap masuk terlebih dahulu.' };
-    if (currentUser.role !== 'VERIFIKATOR') {
-      return { success: false, message: 'Hanya peran VERIFIKATOR yang berwenang melakukan koreksi data keluar.' };
+
+    const existing = outgoingList.find(item => item.id === id);
+    if (!existing) return { success: false, message: 'Transaksi bahan baku keluar tidak ditemukan.' };
+
+    const canEditAny = checkPermission(currentUser.role, 'keluar', 'edit');
+    const canCorrectPending =
+      currentUser.role === 'VERIFIKATOR' && existing.status === 'Menunggu Verifikasi';
+
+    if (!canEditAny && !canCorrectPending) {
+      return {
+        success: false,
+        message: 'Anda tidak memiliki izin untuk mengedit transaksi bahan baku keluar ini.'
+      };
     }
 
-    setOutgoingList(prev =>
-      prev.map(item => (item.id === id ? { ...item, ...updatedData } : item))
-    );
-    return { success: true, message: 'Koreksi data bahan baku keluar berhasil disimpan.' };
+    const nextMaterialId = updatedData.materialId ?? existing.materialId;
+    const targetMaterial = materials.find(m => m.id === nextMaterialId);
+    if (!targetMaterial) {
+      return { success: false, message: 'Jenis bahan baku yang dipilih tidak valid.' };
+    }
+
+    const nextQty =
+      updatedData.quantityKg !== undefined ? Number(updatedData.quantityKg) : existing.quantityKg;
+    if (isNaN(nextQty) || nextQty <= 0) {
+      return { success: false, message: 'Jumlah bahan baku keluar harus lebih besar dari 0 kg.' };
+    }
+
+    const nextPurpose =
+      updatedData.purpose !== undefined ? updatedData.purpose.trim() : existing.purpose;
+    if (!nextPurpose) {
+      return { success: false, message: 'Deskripsi atau tujuan produksi wajib diisi.' };
+    }
+
+    const nextDate = updatedData.date !== undefined ? updatedData.date : existing.date;
+    if (!nextDate) {
+      return { success: false, message: 'Tanggal transaksi wajib diisi.' };
+    }
+
+    const nextOutgoingList = outgoingList.map(item => {
+      if (item.id !== id) return item;
+      return {
+        ...item,
+        ...updatedData,
+        date: nextDate,
+        materialId: targetMaterial.id,
+        materialName: targetMaterial.name,
+        quantityKg: nextQty,
+        purpose: nextPurpose
+      };
+    });
+
+    if (existing.status === 'Terverifikasi') {
+      const integrity = validateInventoryIntegrity(materials, incomingList, nextOutgoingList, returnsList);
+      if (!integrity.valid) {
+        return { success: false, message: integrity.message };
+      }
+    } else {
+      const targetSummary = stockSummaries.find(s => s.materialId === targetMaterial.id);
+      const available = targetSummary ? targetSummary.currentStock : 0;
+      const check = canFulfillOutgoing(available, nextQty);
+      if (!check.allowed) {
+        return { success: false, message: check.message };
+      }
+    }
+
+    setOutgoingList(nextOutgoingList);
+    return {
+      success: true,
+      message:
+        currentUser.role === 'VERIFIKATOR'
+          ? 'Koreksi data bahan baku keluar berhasil disimpan.'
+          : `Transaksi ${existing.transactionNumber} berhasil diperbarui.`
+    };
+  };
+
+  const deleteOutgoing = (id: string) => {
+    if (!currentUser) return { success: false, message: 'Harap masuk terlebih dahulu.' };
+    if (!checkPermission(currentUser.role, 'keluar', 'delete')) {
+      return {
+        success: false,
+        message: 'Hanya PEMILIK dan OPERATOR yang berwenang menghapus transaksi bahan baku keluar.'
+      };
+    }
+
+    const existing = outgoingList.find(item => item.id === id);
+    if (!existing) return { success: false, message: 'Transaksi bahan baku keluar tidak ditemukan.' };
+
+    const nextOutgoingList = outgoingList.filter(item => item.id !== id);
+    setOutgoingList(nextOutgoingList);
+    return {
+      success: true,
+      message: `Transaksi ${existing.transactionNumber} berhasil dihapus dan stok telah dihitung ulang.`
+    };
   };
 
   const verifyOutgoing = (id: string) => {
@@ -410,14 +584,122 @@ export const InventoryProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const updateReturn = (id: string, updatedData: Partial<ReturnTransaction>) => {
     if (!currentUser) return { success: false, message: 'Harap masuk terlebih dahulu.' };
-    if (currentUser.role !== 'VERIFIKATOR') {
-      return { success: false, message: 'Hanya peran VERIFIKATOR yang berwenang mengoreksi informasi retur.' };
+
+    const existing = returnsList.find(item => item.id === id);
+    if (!existing) return { success: false, message: 'Transaksi retur penjualan tidak ditemukan.' };
+
+    const canEditAny = checkPermission(currentUser.role, 'retur', 'edit');
+    const canCorrectPending =
+      currentUser.role === 'VERIFIKATOR' && existing.status === 'Menunggu Verifikasi';
+
+    if (!canEditAny && !canCorrectPending) {
+      return {
+        success: false,
+        message: 'Anda tidak memiliki izin untuk mengedit transaksi retur ini.'
+      };
     }
 
-    setReturnsList(prev =>
-      prev.map(item => (item.id === id ? { ...item, ...updatedData } : item))
-    );
-    return { success: true, message: 'Informasi retur penjualan berhasil diperbarui.' };
+    const nextMaterialId = updatedData.materialId ?? existing.materialId;
+    const targetMaterial = materials.find(m => m.id === nextMaterialId);
+    if (!targetMaterial) {
+      return { success: false, message: 'Jenis bahan baku yang dipilih tidak valid.' };
+    }
+
+    const nextQty =
+      updatedData.quantityKg !== undefined ? Number(updatedData.quantityKg) : existing.quantityKg;
+    if (isNaN(nextQty) || nextQty <= 0) {
+      return { success: false, message: 'Jumlah retur harus lebih besar dari 0 kg.' };
+    }
+
+    const nextInvoice =
+      updatedData.invoiceOrCustomer !== undefined
+        ? updatedData.invoiceOrCustomer.trim()
+        : existing.invoiceOrCustomer;
+    if (!nextInvoice) {
+      return { success: false, message: 'Nomor nota atau nama pelanggan wajib diisi.' };
+    }
+
+    const nextReason =
+      updatedData.reason !== undefined ? updatedData.reason.trim() : existing.reason;
+    if (!nextReason) {
+      return { success: false, message: 'Alasan retur wajib diisi.' };
+    }
+
+    const nextDate = updatedData.date !== undefined ? updatedData.date : existing.date;
+    if (!nextDate) {
+      return { success: false, message: 'Tanggal retur wajib diisi.' };
+    }
+
+    const nextCondition = updatedData.condition ?? existing.condition;
+    let nextReusable =
+      updatedData.isReusableForStock !== undefined
+        ? updatedData.isReusableForStock
+        : existing.isReusableForStock;
+
+    if (nextCondition === 'Biji Rusak / Terkontaminasi / Cacat' && existing.status === 'Disetujui') {
+      nextReusable = false;
+    }
+    if (existing.status === 'Ditolak') {
+      nextReusable = false;
+    }
+
+    const nextReturnsList = returnsList.map(item => {
+      if (item.id !== id) return item;
+      return {
+        ...item,
+        ...updatedData,
+        date: nextDate,
+        materialId: targetMaterial.id,
+        materialName: targetMaterial.name,
+        quantityKg: nextQty,
+        invoiceOrCustomer: nextInvoice,
+        reason: nextReason,
+        condition: nextCondition,
+        isReusableForStock: nextReusable
+      };
+    });
+
+    const integrity = validateInventoryIntegrity(materials, incomingList, outgoingList, nextReturnsList);
+    if (!integrity.valid) {
+      return { success: false, message: integrity.message };
+    }
+
+    setReturnsList(nextReturnsList);
+    return {
+      success: true,
+      message:
+        currentUser.role === 'VERIFIKATOR'
+          ? 'Informasi retur penjualan berhasil diperbarui.'
+          : `Transaksi retur ${existing.transactionNumber} berhasil diperbarui.`
+    };
+  };
+
+  const deleteReturn = (id: string) => {
+    if (!currentUser) return { success: false, message: 'Harap masuk terlebih dahulu.' };
+    if (!checkPermission(currentUser.role, 'retur', 'delete')) {
+      return {
+        success: false,
+        message: 'Hanya PEMILIK dan OPERATOR yang berwenang menghapus transaksi retur penjualan.'
+      };
+    }
+
+    const existing = returnsList.find(item => item.id === id);
+    if (!existing) return { success: false, message: 'Transaksi retur penjualan tidak ditemukan.' };
+
+    const nextReturnsList = returnsList.filter(item => item.id !== id);
+
+    if (existing.status === 'Disetujui' && existing.isReusableForStock === true) {
+      const integrity = validateInventoryIntegrity(materials, incomingList, outgoingList, nextReturnsList);
+      if (!integrity.valid) {
+        return { success: false, message: integrity.message };
+      }
+    }
+
+    setReturnsList(nextReturnsList);
+    return {
+      success: true,
+      message: `Transaksi retur ${existing.transactionNumber} berhasil dihapus dan stok telah dihitung ulang.`
+    };
   };
 
   const verifyReturn = (id: string) => {
@@ -616,12 +898,15 @@ export const InventoryProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         switchRole,
         addIncoming,
         updateIncoming,
+        deleteIncoming,
         verifyIncoming,
         addOutgoing,
         updateOutgoing,
+        deleteOutgoing,
         verifyOutgoing,
         addReturn,
         updateReturn,
+        deleteReturn,
         verifyReturn,
         approveReturn,
         rejectReturn,

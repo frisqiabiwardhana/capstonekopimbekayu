@@ -5,7 +5,8 @@ import {
   determineStockStatus,
   canFulfillOutgoing,
   checkPermission,
-  getAuthorizedMenus
+  getAuthorizedMenus,
+  validateInventoryIntegrity
 } from './inventoryRules';
 import { CoffeeMaterial, IncomingTransaction, OutgoingTransaction, ReturnTransaction } from '../types/inventory';
 
@@ -201,3 +202,89 @@ test('getAuthorizedMenus hides unauthorized navigation items per role', () => {
   assert.ok(pemilikMenus.includes('pembukuan'));
   assert.ok(pemilikMenus.includes('pengguna'));
 });
+
+test('checkPermission grants edit and delete on transactions to Operator and Pemilik only, not Verifikator', () => {
+  for (const menu of ['masuk', 'keluar', 'retur'] as const) {
+    assert.equal(checkPermission('OPERATOR', menu, 'edit'), true);
+    assert.equal(checkPermission('OPERATOR', menu, 'delete'), true);
+    assert.equal(checkPermission('PEMILIK', menu, 'edit'), true);
+    assert.equal(checkPermission('PEMILIK', menu, 'delete'), true);
+    assert.equal(checkPermission('VERIFIKATOR', menu, 'edit'), false);
+    assert.equal(checkPermission('VERIFIKATOR', menu, 'delete'), false);
+    assert.equal(checkPermission('VERIFIKATOR', menu, 'verify'), true);
+  }
+});
+
+test('damaged returns never add to stock even if isReusableForStock flag is true', () => {
+  const damagedReturn: ReturnTransaction = {
+    id: 'ret-damaged',
+    transactionNumber: 'RET-999',
+    date: '2026-02-08',
+    materialId: 'robusta-1',
+    materialName: 'Biji Kopi Robusta',
+    quantityKg: 25,
+    invoiceOrCustomer: 'Kedai Uji',
+    reason: 'Terkontaminasi lembab',
+    condition: 'Biji Rusak / Terkontaminasi / Cacat',
+    status: 'Disetujui',
+    isReusableForStock: true,
+    createdBy: { id: 'u1', name: 'Budi', role: 'OPERATOR' },
+    createdAt: '2026-02-08T08:00:00Z'
+  };
+
+  const summary = calculateMaterialStock(mockMaterial, [], [], [damagedReturn]);
+  assert.equal(summary.returnsReusableKg, 0);
+  assert.equal(summary.currentStock, 100);
+});
+
+test('validateInventoryIntegrity prevents edits or deletions that produce negative stock', () => {
+  const materialNoInitial: CoffeeMaterial = { ...mockMaterial, initialStock: 0 };
+  const verifiedIn: IncomingTransaction = {
+    id: 'in-v1',
+    transactionNumber: 'IN-100',
+    date: '2026-02-01',
+    materialId: 'robusta-1',
+    materialName: 'Biji Kopi Robusta',
+    quantityKg: 100,
+    supplierName: 'Petani A',
+    status: 'Terverifikasi',
+    createdBy: { id: 'u1', name: 'Budi', role: 'OPERATOR' },
+    createdAt: '2026-02-01T08:00:00Z'
+  };
+  const verifiedOut: OutgoingTransaction = {
+    id: 'out-v1',
+    transactionNumber: 'OUT-100',
+    date: '2026-02-02',
+    materialId: 'robusta-1',
+    materialName: 'Biji Kopi Robusta',
+    quantityKg: 90,
+    purpose: 'Batch 1',
+    status: 'Terverifikasi',
+    createdBy: { id: 'u1', name: 'Budi', role: 'OPERATOR' },
+    createdAt: '2026-02-02T08:00:00Z'
+  };
+
+  // Valid baseline: 100 - 90 = 10 kg
+  assert.equal(
+    validateInventoryIntegrity([materialNoInitial], [verifiedIn], [verifiedOut], []).valid,
+    true
+  );
+
+  // Deleting verified incoming would yield -90 kg -> blocked
+  const delCheck = validateInventoryIntegrity([materialNoInitial], [], [verifiedOut], []);
+  assert.equal(delCheck.valid, false);
+  assert.equal(delCheck.resultingStock, -90);
+
+  // Reducing incoming from 100 to 80 yields -10 kg -> blocked
+  const reducedIn = [{ ...verifiedIn, quantityKg: 80 }];
+  const editInCheck = validateInventoryIntegrity([materialNoInitial], reducedIn, [verifiedOut], []);
+  assert.equal(editInCheck.valid, false);
+  assert.equal(editInCheck.resultingStock, -10);
+
+  // Increasing outgoing from 90 to 105 yields -5 kg -> blocked
+  const increasedOut = [{ ...verifiedOut, quantityKg: 105 }];
+  const editOutCheck = validateInventoryIntegrity([materialNoInitial], [verifiedIn], increasedOut, []);
+  assert.equal(editOutCheck.valid, false);
+  assert.equal(editOutCheck.resultingStock, -5);
+});
+

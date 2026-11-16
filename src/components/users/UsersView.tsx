@@ -8,7 +8,8 @@ import {
   Lock,
   CheckCircle,
   AlertCircle,
-  Check
+  Check,
+  X
 } from 'lucide-react';
 import { useInventory } from '../../context/InventoryContext';
 import { Badge } from '../common/Badge';
@@ -37,6 +38,7 @@ export const UsersView: React.FC = () => {
   });
 
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
+  const [pageFeedback, setPageFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
   const isOwner = currentUser?.role === 'PEMILIK';
 
@@ -121,7 +123,9 @@ export const UsersView: React.FC = () => {
   const handleToggle = (id: string) => {
     const res = toggleUserStatus(id);
     if (!res.success && res.message) {
-      alert(res.message);
+      setPageFeedback({ type: 'error', message: res.message });
+    } else if (res.success && res.message) {
+      setPageFeedback({ type: 'success', message: res.message });
     }
   };
 
@@ -161,6 +165,33 @@ export const UsersView: React.FC = () => {
           <span>Tambah Akun Pengguna</span>
         </button>
       </div>
+
+      {pageFeedback && (
+        <div
+          className={`p-3.5 rounded-2xl text-xs flex items-center justify-between gap-3 border ${
+            pageFeedback.type === 'error'
+              ? 'bg-rose-50 text-rose-800 border-rose-200'
+              : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {pageFeedback.type === 'error' ? (
+              <AlertCircle className="w-4 h-4 shrink-0" />
+            ) : (
+              <Check className="w-4 h-4 shrink-0" />
+            )}
+            <span className="font-medium">{pageFeedback.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPageFeedback(null)}
+            aria-label="Tutup notifikasi"
+            className="p-1 rounded-lg hover:bg-black/5 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Users Table */}
       <div className="bg-white rounded-2xl border border-[#D8C7B3]/60 shadow-xs overflow-hidden">

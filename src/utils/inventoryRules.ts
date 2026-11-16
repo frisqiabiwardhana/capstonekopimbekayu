@@ -12,15 +12,20 @@ import {
 } from '../types/inventory';
 
 /**
- * Calculates current stock according to formula:
- * Stok Akhir = Stok Awal + Bahan Baku Masuk Terverifikasi - Bahan Baku Keluar Terverifikasi + Retur Disetujui yang Layak Digunakan.
+ * Computes raw (unclamped) stock balance for a material.
  */
-export function calculateMaterialStock(
+export function calculateRawMaterialStock(
   material: CoffeeMaterial,
   incomingList: IncomingTransaction[],
   outgoingList: OutgoingTransaction[],
   returnsList: ReturnTransaction[]
-): StockSummary {
+): {
+  initialStock: number;
+  verifiedIncoming: number;
+  verifiedOutgoing: number;
+  reusableReturns: number;
+  rawStock: number;
+} {
   // 1. Only verified incoming items count
   const verifiedIncoming = incomingList
     .filter(item => item.materialId === material.id && item.status === 'Terverifikasi')
@@ -31,19 +36,48 @@ export function calculateMaterialStock(
     .filter(item => item.materialId === material.id && item.status === 'Terverifikasi')
     .reduce((sum, item) => sum + (Number(item.quantityKg) || 0), 0);
 
-  // 3. Only approved returns that are marked as reusable for stock count
+  // 3. Only approved returns that are marked as reusable AND not damaged/unusable count
   const reusableReturns = returnsList
     .filter(
       item =>
         item.materialId === material.id &&
         item.status === 'Disetujui' &&
-        item.isReusableForStock === true
+        item.isReusableForStock === true &&
+        item.condition !== 'Biji Rusak / Terkontaminasi / Cacat'
     )
     .reduce((sum, item) => sum + (Number(item.quantityKg) || 0), 0);
 
   const initialStock = Number(material.initialStock) || 0;
-  const currentStock = Math.max(0, initialStock + verifiedIncoming - verifiedOutgoing + reusableReturns);
+  const rawStock = Number((initialStock + verifiedIncoming - verifiedOutgoing + reusableReturns).toFixed(2));
 
+  return {
+    initialStock,
+    verifiedIncoming: Number(verifiedIncoming.toFixed(2)),
+    verifiedOutgoing: Number(verifiedOutgoing.toFixed(2)),
+    reusableReturns: Number(reusableReturns.toFixed(2)),
+    rawStock
+  };
+}
+
+/**
+ * Calculates current stock according to formula:
+ * Stok Akhir = Stok Awal + Bahan Baku Masuk Terverifikasi - Bahan Baku Keluar Terverifikasi + Retur Disetujui yang Layak Digunakan.
+ */
+export function calculateMaterialStock(
+  material: CoffeeMaterial,
+  incomingList: IncomingTransaction[],
+  outgoingList: OutgoingTransaction[],
+  returnsList: ReturnTransaction[]
+): StockSummary {
+  const {
+    initialStock,
+    verifiedIncoming,
+    verifiedOutgoing,
+    reusableReturns,
+    rawStock
+  } = calculateRawMaterialStock(material, incomingList, outgoingList, returnsList);
+
+  const currentStock = Math.max(0, rawStock);
   const status = determineStockStatus(currentStock, material.minThreshold);
 
   return {
@@ -51,13 +85,36 @@ export function calculateMaterialStock(
     materialName: material.name,
     unit: material.unit,
     initialStock,
-    incomingVerifiedKg: Number(verifiedIncoming.toFixed(2)),
-    outgoingVerifiedKg: Number(verifiedOutgoing.toFixed(2)),
-    returnsReusableKg: Number(reusableReturns.toFixed(2)),
-    currentStock: Number(currentStock.toFixed(2)),
+    incomingVerifiedKg: verifiedIncoming,
+    outgoingVerifiedKg: verifiedOutgoing,
+    returnsReusableKg: reusableReturns,
+    currentStock,
     minThreshold: material.minThreshold,
     status
   };
+}
+
+/**
+ * Validates that no material drops below 0 kg after a proposed transaction edit or deletion.
+ */
+export function validateInventoryIntegrity(
+  materials: CoffeeMaterial[],
+  incomingList: IncomingTransaction[],
+  outgoingList: OutgoingTransaction[],
+  returnsList: ReturnTransaction[]
+): { valid: boolean; message?: string; failingMaterial?: CoffeeMaterialType; resultingStock?: number } {
+  for (const mat of materials) {
+    const { rawStock } = calculateRawMaterialStock(mat, incomingList, outgoingList, returnsList);
+    if (rawStock < 0) {
+      return {
+        valid: false,
+        failingMaterial: mat.name,
+        resultingStock: rawStock,
+        message: `Operasi dibatalkan: Perubahan ini akan membuat stok ${mat.name} menjadi negatif (${rawStock} kg) karena sudah digunakan pada transaksi keluar.`
+      };
+    }
+  }
+  return { valid: true };
 }
 
 /**
@@ -108,7 +165,7 @@ export function canFulfillOutgoing(currentStock: number, requestedKg: number): {
 export function checkPermission(
   role: UserRole,
   menu: AppMenu,
-  action: 'view' | 'input' | 'verify' | 'approve' | 'edit_threshold' | 'export_print' | 'manage_users'
+  action: 'view' | 'input' | 'edit' | 'delete' | 'verify' | 'approve' | 'edit_threshold' | 'export_print' | 'manage_users'
 ): boolean {
   switch (menu) {
     case 'dashboard':
@@ -119,18 +176,21 @@ export function checkPermission(
     case 'masuk':
       if (action === 'view') return true; // all can view
       if (action === 'input') return role === 'OPERATOR';
+      if (action === 'edit' || action === 'delete') return role === 'PEMILIK' || role === 'OPERATOR';
       if (action === 'verify') return role === 'VERIFIKATOR';
       return false;
 
     case 'keluar':
       if (action === 'view') return true;
       if (action === 'input') return role === 'OPERATOR';
+      if (action === 'edit' || action === 'delete') return role === 'PEMILIK' || role === 'OPERATOR';
       if (action === 'verify') return role === 'VERIFIKATOR';
       return false;
 
     case 'retur':
       if (action === 'view') return true;
       if (action === 'input') return role === 'OPERATOR';
+      if (action === 'edit' || action === 'delete') return role === 'PEMILIK' || role === 'OPERATOR';
       if (action === 'verify') return role === 'VERIFIKATOR';
       if (action === 'approve') return role === 'PEMILIK';
       return false;
@@ -255,7 +315,9 @@ export function generateStockCardMovements(
   returnsList
     .filter(r => r.materialId === material.id && r.status === 'Disetujui')
     .forEach(r => {
-      const isReusable = r.isReusableForStock === true;
+      const isReusable =
+        r.isReusableForStock === true &&
+        r.condition !== 'Biji Rusak / Terkontaminasi / Cacat';
       events.push({
         id: r.id,
         date: r.date,
